@@ -18,6 +18,7 @@ import { askJev } from "./router.mjs";
 import { decide } from "./policy.mjs";
 import { log } from "./log.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
+import { isForeignRequest, refuseForeign } from "./loopback.mjs";
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 const debug = (line) => process.env.JEV_DEBUG && log(line);
@@ -221,7 +222,14 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
     return s;
   };
 
+  // Read once at listen time: after close(), server.address() is null, and a request still
+  // arriving on a keep-alive socket must not crash the process.
+  let port = 0;
   const server = http.createServer((req, res) => {
+    if (isForeignRequest(req.headers, port)) {
+      debug(`refused request for host ${req.headers.host} origin ${req.headers.origin ?? "-"}`);
+      return refuseForeign(res);
+    }
     // Claude Code probes the base URL before its first request.
     if (req.method === "HEAD") return res.writeHead(200).end();
 
@@ -384,5 +392,6 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { port: server.address().port, close: () => server.close() };
+  port = server.address().port;
+  return { port, close: () => server.close() };
 }

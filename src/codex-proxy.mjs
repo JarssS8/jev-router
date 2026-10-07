@@ -7,6 +7,7 @@ import { askJev } from "./router.mjs";
 import { decide } from "./policy.mjs";
 import { log } from "./log.mjs";
 import { writeDecision, writeStatus } from "./status.mjs";
+import { isForeignRequest, refuseForeign } from "./loopback.mjs";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const API_BASE_URL = "https://api.openai.com/v1";
@@ -173,7 +174,14 @@ export async function startCodexProxy({
   const states = new Map();
   const models = new Map();
 
+  // Read once at listen time: after close(), server.address() is null, and a request still
+  // arriving on a keep-alive socket must not crash the process.
+  let port = 0;
   const server = http.createServer((req, res) => {
+    if (isForeignRequest(req.headers, port)) {
+      debug(`refused request for host ${req.headers.host} origin ${req.headers.origin ?? "-"}`);
+      return refuseForeign(res);
+    }
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", async () => {
@@ -319,5 +327,6 @@ export async function startCodexProxy({
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { port: server.address().port, close: () => server.close() };
+  port = server.address().port;
+  return { port, close: () => server.close() };
 }
