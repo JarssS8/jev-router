@@ -1,6 +1,6 @@
-import { chmodSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AUTO_MODEL } from "./config.mjs";
 
 export const USER_SETTINGS = join(homedir(), ".claude", "settings.json");
@@ -40,16 +40,36 @@ function replaceFile(file, contents) {
 }
 
 /**
- * The model saved as the user's default, ignoring a sentinel left behind by a session that
- * did not exit cleanly, which is not a preference worth restoring.
+ * Where the user's real default model is remembered between sessions. Without it, a second
+ * session started while the first had the sentinel saved would see no previous model, and on
+ * exit would delete the user's choice for good.
+ */
+const memoFor = (file) => join(dirname(file), ".jev-router-model.json");
+
+/**
+ * The model saved as the user's default. A sentinel in the file was left by another session,
+ * running or crashed, so the real choice is read from the memo recorded before it was saved.
  */
 export function readSavedModel(file = USER_SETTINGS) {
+  let model;
   try {
-    const model = JSON.parse(readFileSync(file, "utf8")).model;
-    return model === AUTO_MODEL ? undefined : model;
+    model = JSON.parse(readFileSync(file, "utf8")).model;
   } catch {
     return undefined;
   }
+  if (model === AUTO_MODEL) {
+    try {
+      return JSON.parse(readFileSync(memoFor(file), "utf8")).model;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    writeFileSync(memoFor(file), JSON.stringify({ model }), { mode: FALLBACK_MODE });
+  } catch {
+    // Only matters for a later concurrent session; this one already has the answer.
+  }
+  return model;
 }
 
 /**
@@ -64,7 +84,15 @@ export function restoreSavedModel(previous, file = USER_SETTINGS) {
     if (settings.model !== AUTO_MODEL) return false;
     if (previous === undefined) delete settings.model;
     else settings.model = previous;
-    replaceFile(file, `${JSON.stringify(settings, null, 2)}\n`);
+    // Dotfile managers (stow, chezmoi...) link settings.json elsewhere; renaming over the link
+    // would replace it with a plain file, so the write goes to the file it points at.
+    let target = file;
+    try {
+      target = realpathSync(file);
+    } catch {
+      // Unresolvable; write the path as given.
+    }
+    replaceFile(target, `${JSON.stringify(settings, null, 2)}\n`);
     return true;
   } catch {
     return false;

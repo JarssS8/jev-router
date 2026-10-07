@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, readdirSync, statSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { readSavedModel, restoreSavedModel } from "../src/settings.mjs";
@@ -53,4 +53,23 @@ test("restoring leaves no temporary file behind", () => {
   const file = fileWith({ model: "jev-router" });
   assert.equal(restoreSavedModel("opus", file), true);
   assert.deepEqual(readdirSync(dirname(file)), ["settings.json"]);
+});
+
+test("a second session started while the sentinel is saved still restores the real model", () => {
+  const file = fileWith({ model: "opus" });
+  assert.equal(readSavedModel(file), "opus", "session A starts and remembers the real model");
+  writeFileSync(file, JSON.stringify({ model: "jev-router" }));
+  const sessionB = readSavedModel(file);
+  assert.equal(sessionB, "opus", "session B sees the sentinel but recovers the real model");
+  assert.equal(restoreSavedModel(sessionB, file), true);
+  assert.equal(modelIn(file), "opus");
+});
+
+test("restoring through a symlinked settings file keeps the link", { skip: process.platform === "win32" }, () => {
+  const real = fileWith({ model: "jev-router" });
+  const link = join(mkdtempSync(join(tmpdir(), "jev-link-")), "settings.json");
+  symlinkSync(real, link);
+  assert.equal(restoreSavedModel("opus", link), true);
+  assert.equal(lstatSync(link).isSymbolicLink(), true);
+  assert.equal(modelIn(real), "opus");
 });
