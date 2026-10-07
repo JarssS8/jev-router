@@ -9,6 +9,7 @@ import {
   conversationKey,
   sessionOf,
   startProxy,
+  requestTokensOf,
 } from "../src/proxy.mjs";
 
 test("only the sentinel model is routed", () => {
@@ -376,6 +377,57 @@ test("a string system prompt survives folding", () => {
   const body = { model: "jev-router", system: "base", messages: [{ role: "user", content: "hi" }, { role: "system", content: "env" }] };
   applyTier(body, "sonnet", "claude-sonnet-5");
   assert.deepEqual(body.system, [{ type: "text", text: "base" }, { type: "text", text: "env" }]);
+});
+
+test("request size counts system, tools and messages, images at their cap, not signatures", () => {
+  const base = requestTokensOf({ system: "", tools: [], messages: [] });
+  const big = requestTokensOf({ system: "x".repeat(4000), tools: [], messages: [] });
+  assert.equal(big - base, 1000);
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(400000) } };
+  const withImage = requestTokensOf({ messages: [{ role: "user", content: [image] }] });
+  assert.ok(withImage >= 4784 && withImage < 4784 + 100, String(withImage));
+  const thinking = { type: "thinking", thinking: "", signature: "S".repeat(400000) };
+  assert.ok(requestTokensOf({ messages: [{ role: "assistant", content: [thinking] }] }) < 100);
+});
+
+const routeOnce = async (t, { tools, choice, prompt = "say hi" }) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      seen.push(JSON.parse(Buffer.concat(chunks).toString()));
+      res.setHeader("content-type", "application/json");
+      res.end('{"id":"msg_1","type":"message"}');
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  t.after(() => upstream.close());
+  let offered;
+  const { port, close } = await startProxy({
+    upstreamURL: `http://127.0.0.1:${upstream.address().port}`,
+    route: async ({ models }) => ((offered = models.map((m) => m.id)), { choice, confidence: 0.99, ms: 1 }),
+  });
+  t.after(close);
+  await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "jev-router", tools, messages: [{ role: "user", content: `${prompt} ${Math.random()}` }] }),
+  });
+  return { model: seen[0].model, offered };
+};
+
+test("a request too large for haiku's window steps up instead of failing there", async (t) => {
+  // ~160k estimated tokens of tool definitions: over 75% of Haiku's 200k window.
+  const tools = [{ name: "Bash", description: "x".repeat(640000) }];
+  const { model, offered } = await routeOnce(t, { tools, choice: "claude-haiku-4-5-20251001", prompt: "use haiku" });
+  assert.ok(!offered.includes("claude-haiku-4-5-20251001"), "haiku is not offered to Jev");
+  assert.equal(model, "claude-sonnet-5-5", "an explicit haiku request steps up to the next model that fits");
+});
+
+test("a small request can still route to haiku", async (t) => {
+  const { model } = await routeOnce(t, { tools: [{ name: "Bash" }], choice: "claude-haiku-4-5-20251001" });
+  assert.equal(model, "claude-haiku-4-5-20251001");
 });
 
 test("an unknown tier leaves the request untouched", () => {

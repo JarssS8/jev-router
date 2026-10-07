@@ -7,9 +7,13 @@ import { choice, score } from "@typesafe-ai/sdk";
  * version within the same tier such as `claude-sonnet-4-6`. The capability flags come from
  * the Agent SDK's model catalogue: Haiku supports neither adaptive thinking nor effort, so
  * those fields have to be stripped when routing down to it.
+ *
+ * `maxInputTokens` is set only where it is known: the API reported Haiku 4.5's limit as
+ * 200000 when a request exceeded it. It is the fallback for print-mode runs, where Claude
+ * Code never fetches the model catalog; the catalog's own `max_input_tokens` wins otherwise.
  */
 export const TIERS = [
-  { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false },
+  { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false, maxInputTokens: 200000 },
   { name: "sonnet", id: "claude-sonnet-5-5", family: "sonnet", thinking: true, effort: true },
   { name: "opus", id: "claude-opus-5-5", family: "opus", thinking: true, effort: true },
   { name: "fable", id: "claude-fable-5-1", family: "fable", thinking: true, effort: true },
@@ -95,6 +99,13 @@ export const THRESHOLDS = {
   jevTimeoutMs: 1500,
   jevDeadlineMs: 3000,
   jevMaxRetries: 1,
+  /**
+   * Share of a model's input window a request may fill before routing treats that model as
+   * unavailable. Request size is a characters/4 estimate, which runs low: the same Claude
+   * Code setup estimated at ~181k-188k was ~219k by the API's count, 14-17% under. 0.75
+   * keeps a full margin over that.
+   */
+  contextHeadroom: 0.75,
 };
 
 export const CONTEXT_WINDOW_TOKENS = 200000;

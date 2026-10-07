@@ -10,6 +10,7 @@ import {
   tierSpec,
   isAuto,
   shouldUseExactModel,
+  THRESHOLDS,
   rejectsDisabledThinking,
   rejectsForcedToolChoice,
   supportsSystemMessages,
@@ -150,11 +151,38 @@ export function claudeModels(catalog = []) {
         model.created_at && `released ${model.created_at.slice(0, 10)}`,
         model.max_input_tokens && `${model.max_input_tokens} input tokens`,
       ].filter(Boolean).join("; "),
+      maxInputTokens: model.max_input_tokens || TIERS.find((tier) => tier.id === model.id)?.maxInputTokens,
     }));
   return models.length
     ? models
-    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id }));
+    : TIERS.map((tier) => ({ id: tier.id, tier: tier.name, description: tier.id, maxInputTokens: tier.maxInputTokens }));
 }
+
+// Anthropic documents an image's cost as at most 4784 visual tokens (the high-resolution
+// tier's cap); its base64 length says nothing about that, so each counts at the cap instead.
+const IMAGE_TOKENS = 4784;
+
+/**
+ * Estimated input tokens for a whole Messages request: system prompt, tool definitions and
+ * conversation, at characters/4. Base64 images count at their documented cap, and thinking
+ * signatures, which are opaque verification data rather than text, are left out.
+ */
+export function requestTokensOf(body) {
+  let images = 0;
+  const text = JSON.stringify([body.system ?? "", body.tools ?? [], body.messages ?? ""], (key, value) => {
+    if (key === "signature" && typeof value === "string") return undefined;
+    if (value?.type === "image" && value.source?.type === "base64") {
+      images++;
+      return undefined;
+    }
+    return value;
+  });
+  return Math.round(text.length / 4) + images * IMAGE_TOKENS;
+}
+
+/** Whether `model` can take a request of `requestTokens`, with headroom for the estimate. */
+export const fitsWindow = (model, requestTokens) =>
+  !model?.maxInputTokens || requestTokens <= model.maxInputTokens * THRESHOLDS.contextHeadroom;
 
 const modelForTier = (models, tier) => models.find((model) => model.tier === tier)?.id ?? idOf(tier);
 
@@ -266,8 +294,13 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
             const explaining = prompt?.includes("<jev-explain>");
             let fresh = null;
             if (prompt && !explaining) {
-              const models = claudeModels([...catalog.values()]).filter((model) =>
-                availableTiers().includes(model.tier),
+              // Claude Code's system prompt and tool definitions can be most of a request: with
+              // many MCP servers they alone can exceed Haiku's window, and the API would reject
+              // the turn outright. A model too small for the request counts as unavailable.
+              const requestTokens = requestTokensOf(body);
+              const catalogModels = claudeModels([...catalog.values()]);
+              const models = catalogModels.filter(
+                (model) => availableTiers().includes(model.tier) && fitsWindow(model, requestTokens),
               );
               const available = [...new Set(models.map((model) => model.tier))];
               const currentModel = state.model ?? modelForTier(models, current);
@@ -285,7 +318,7 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
               const model =
                 shouldUseExactModel(reason, chosen?.tier, tier)
                   ? chosen.id
-                  : tier === current
+                  : tier === current && fitsWindow(catalogModels.find((m) => m.id === currentModel), requestTokens)
                     ? currentModel
                     : modelForTier(models, tier);
               state.tier = tier;
