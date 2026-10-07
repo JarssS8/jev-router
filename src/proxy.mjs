@@ -14,6 +14,7 @@ import {
   rejectsDisabledThinking,
   rejectsForcedToolChoice,
   supportsSystemMessages,
+  rankOf,
 } from "./config.mjs";
 import { askJev } from "./router.mjs";
 import { decide } from "./policy.mjs";
@@ -332,9 +333,28 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
                 jev: jev ? { request: jev.request, response: jev.response } : null,
               };
               debug(
-                `${key} ${jev ? `${jev.ms}ms p=${jev.confidence.toFixed(2)}` : "no-jev"} ` +
+                `${key} ${jev ? `${jev.ms}ms p=${Number(jev.confidence).toFixed(2)}` : "no-jev"} ` +
                   `${current} -> ${tier} (${reason}) ctx~${contextTokens} | ${prompt.slice(0, 60)}`,
               );
+            }
+            // A turn stays on one model, but every tool result grows the request, so a
+            // follow-up can outgrow the model the turn started on and be rejected. Step up to
+            // the smallest available model that still fits; the cache rebuild is unavoidable.
+            if (!fresh && state.model) {
+              const requestTokens = requestTokensOf(body);
+              const catalogModels = claudeModels([...catalog.values()]);
+              const pinned = catalogModels.find((m) => m.id === state.model);
+              if (!fitsWindow(pinned, requestTokens)) {
+                const bigger = catalogModels
+                  .filter((m) => availableTiers().includes(m.tier) && rankOf(m.tier) >= rankOf(state.tier))
+                  .sort((a, b) => rankOf(a.tier) - rankOf(b.tier))
+                  .find((m) => m.id !== state.model && fitsWindow(m, requestTokens));
+                if (bigger) {
+                  debug(`${key} outgrew ${state.model} at ~${requestTokens} tokens -> ${bigger.id}`);
+                  state.tier = bigger.tier;
+                  state.model = bigger.id;
+                }
+              }
             }
             // The sentinel is not a real model, so every routed request must be rewritten,
             // including follow-ups that reuse the tier chosen for the turn.
@@ -355,6 +375,16 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
           out = Buffer.from(JSON.stringify(body));
         } catch (err) {
           debug(`passthrough, could not process body: ${err.message}`);
+          // Failing open must still send a real model: the sentinel itself is a 400 upstream.
+          try {
+            const raw = JSON.parse(out.toString());
+            if (isAuto(raw.model)) {
+              applyTier(raw, "opus");
+              out = Buffer.from(JSON.stringify(raw));
+            }
+          } catch {
+            // Not JSON at all; forward it untouched and let the API answer.
+          }
         }
       }
 
@@ -414,8 +444,14 @@ export async function startProxy({ upstreamURL = ANTHROPIC_BASE_URL, route = ask
           up.pipe(res);
         },
       );
+      // Claude Code drops the connection when the user interrupts. `pipe` would keep reading,
+      // and the API would keep generating (and billing) a response nobody reads.
+      res.on("close", () => {
+        if (!res.writableFinished) upstream.destroy();
+      });
       upstream.on("error", (e) => {
         debug(`upstream error: ${e.message}`);
+        if (res.destroyed) return;
         if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
         res.end(JSON.stringify({ type: "error", error: { message: e.message } }));
       });

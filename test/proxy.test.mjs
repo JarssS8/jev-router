@@ -485,3 +485,106 @@ test("the key survives metadata that is not JSON", () => {
   const body = { metadata: { user_id: "not-json" }, messages: [{ role: "user", content: "hi" }] };
   assert.doesNotThrow(() => conversationKey(body));
 });
+
+const fakeUpstream = async (t, onRequest) => {
+  const server = http.createServer(onRequest);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  return `http://127.0.0.1:${server.address().port}`;
+};
+
+const recordingUpstream = (t, seen, models = []) =>
+  fakeUpstream(t, (req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url.startsWith("/v1/models")) return res.end(JSON.stringify({ data: models }));
+      seen.push(JSON.parse(Buffer.concat(chunks)));
+      res.end('{"id":"msg_1","type":"message"}');
+    });
+  });
+
+const post = (port, body) =>
+  fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((response) => response.text());
+
+test("a turn that outgrows its model mid-task steps up to one that fits", async (t) => {
+  const seen = [];
+  const upstreamURL = await recordingUpstream(t, seen, [
+    { id: "claude-haiku-4-5-20251001", max_input_tokens: 1000 },
+    { id: "claude-sonnet-5-5" },
+  ]);
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async () => ({ choice: "claude-haiku-4-5-20251001", confidence: 0.95, ms: 1 }),
+  });
+  t.after(close);
+  await fetch(`http://127.0.0.1:${port}/v1/models`).then((response) => response.text());
+
+  const opening = { role: "user", content: `rename this variable ${process.pid}-grow` };
+  await post(port, { model: "jev-router", tools: [{ name: "Bash" }], messages: [opening] });
+  await post(port, {
+    model: "jev-router",
+    tools: [{ name: "Bash" }],
+    messages: [
+      opening,
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "x".repeat(4000) }] },
+    ],
+  });
+
+  assert.equal(seen[0].model, "claude-haiku-4-5-20251001");
+  assert.equal(seen[1].model, "claude-sonnet-5-5", "the follow-up no longer fits Haiku's window");
+});
+
+test("a routing failure still sends a real model, never the sentinel", async (t) => {
+  const seen = [];
+  const upstreamURL = await recordingUpstream(t, seen);
+  const { port, close } = await startProxy({
+    upstreamURL,
+    route: async () => {
+      throw new Error("router exploded");
+    },
+  });
+  t.after(close);
+
+  await post(port, {
+    model: "jev-router",
+    tools: [{ name: "Bash" }],
+    messages: [{ role: "user", content: `fix this ${process.pid}-fail` }],
+  });
+
+  assert.notEqual(seen[0].model, "jev-router");
+  assert.equal(tierOf(seen[0].model), "opus");
+});
+
+test("a client that disconnects mid-stream cancels the upstream request", async (t) => {
+  let upstreamClosed;
+  const closed = new Promise((resolve) => (upstreamClosed = resolve));
+  const upstreamURL = await fakeUpstream(t, (req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const timer = setInterval(() => res.write("data: {}\n\n"), 10);
+      res.on("close", () => {
+        clearInterval(timer);
+        upstreamClosed(true);
+      });
+    });
+  });
+  const { port, close } = await startProxy({ upstreamURL });
+  t.after(close);
+
+  const client = http.request({ host: "127.0.0.1", port, path: "/v1/messages", method: "POST" }, (res) => {
+    res.once("data", () => client.destroy());
+  });
+  client.on("error", () => {});
+  client.end(JSON.stringify({ model: "claude-opus-5-5", messages: [] }));
+
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(false), 2000));
+  assert.equal(await Promise.race([closed, timeout]), true, "upstream kept streaming after the client left");
+});

@@ -316,8 +316,13 @@ export async function startCodexProxy({
           });
         },
       );
+      // Codex drops the connection when the user interrupts; stop the upstream generation too.
+      res.on("close", () => {
+        if (!res.writableFinished) upstream.destroy();
+      });
       upstream.on("error", (err) => {
         debug(`codex upstream error: ${err.message}`);
+        if (res.destroyed) return;
         if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: err.message, type: "proxy_error" } }));
       });
