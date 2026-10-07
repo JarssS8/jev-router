@@ -36,6 +36,15 @@ test("detectOverride only fires on a real instruction", () => {
   assert.equal(detectOverride("the opus of his career"), null);
 });
 
+test("tier words used as ordinary English are not overrides", () => {
+  assert.equal(detectOverride("use fast-glob instead of readdir"), null);
+  assert.equal(detectOverride("this fails on long inputs"), null);
+  assert.equal(detectOverride("build it with fast refresh"), null);
+  assert.equal(detectOverride("use strong typing everywhere"), null);
+  assert.equal(detectOverride("use the strong model for this"), "opus");
+  assert.equal(detectOverride("please switch to fast."), "haiku");
+});
+
 test("keeps the current model when Jev is unreachable", () => {
   const out = decide({ ...base, jev: null });
   assert.equal(out.tier, "sonnet");

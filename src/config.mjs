@@ -125,19 +125,30 @@ const COMPLEXITY_SCALE = [
 
 export const COMPLEXITY_MAX_SCORE = COMPLEXITY_SCALE.length - 1;
 
-/** Phrases that mean "the human already decided", checked against the raw prompt. */
-export const OVERRIDE_PATTERNS = TIERS.map((t) => ({
-  tier: t.name,
-  re: new RegExp(
-    `\\b(?:use|switch to|with|on)\\s+(?:${{
-      haiku: "haiku|fast|luna",
-      sonnet: "sonnet|balanced|terra",
-      opus: "opus|strong|sol",
-      fable: "fable|long|astra",
-    }[t.name]})\\b`,
-    "i",
-  ),
-}));
+/**
+ * Phrases that mean "the human already decided", checked against the raw prompt. Model names
+ * count unless they are part of a hyphenated word. The tier words (fast, strong...) are also
+ * ordinary English, so they only count when followed by "model"/"tier" or ending the clause:
+ * "use strong" is an instruction, "use strong typing" or "use fast-glob" is not.
+ */
+const OVERRIDE_WORDS = {
+  haiku: { models: "haiku|luna", generic: "fast" },
+  sonnet: { models: "sonnet|terra", generic: "balanced" },
+  opus: { models: "opus|sol", generic: "strong" },
+  fable: { models: "fable|astra", generic: "long" },
+};
+
+export const OVERRIDE_PATTERNS = TIERS.map((t) => {
+  const { models, generic } = OVERRIDE_WORDS[t.name];
+  return {
+    tier: t.name,
+    re: new RegExp(
+      `\\b(?:use|switch to|with|on)\\s+(?:the\\s+)?` +
+        `(?:(?:${models})(?![-\\w])|(?:${generic})(?=\\s+(?:model|tier)\\b|\\s*(?:[.,;:!?)]|$)))`,
+      "i",
+    ),
+  };
+});
 
 export const QUESTIONS = {
   task_complexity: score(
