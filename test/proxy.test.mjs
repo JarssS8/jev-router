@@ -150,7 +150,7 @@ test("a routed request without metadata is recorded under the conversation key",
     req.on("data", () => {});
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
-      res.end('{"id":"msg_1","type":"message","model":"claude-sonnet-5"}');
+      res.end('{"id":"msg_1","type":"message","model":"claude-sonnet-5-5"}');
     });
   });
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
@@ -158,7 +158,7 @@ test("a routed request without metadata is recorded under the conversation key",
 
   const { port, close } = await startProxy({
     upstreamURL: `http://127.0.0.1:${upstream.address().port}`,
-    route: async () => ({ choice: "claude-sonnet-5", confidence: 0.77, ms: 1 }),
+    route: async () => ({ choice: "claude-sonnet-5-5", confidence: 0.77, ms: 1 }),
   });
   t.after(close);
 
@@ -295,9 +295,72 @@ test("routing to opus leaves thinking and effort intact", () => {
     output_config: { effort: "medium" },
   };
   applyTier(body, "opus");
-  assert.equal(body.model, "claude-opus-5");
+  assert.equal(body.model, "claude-opus-5-5");
   assert.deepEqual(body.thinking, { type: "adaptive" });
   assert.deepEqual(body.output_config, { effort: "medium" });
+});
+
+test("routing to opus 5.5 drops disabled thinking and forced tool choice it rejects", () => {
+  const body = {
+    model: "jev-router",
+    thinking: { type: "disabled" },
+    tool_choice: { type: "tool", name: "Read", disable_parallel_tool_use: true },
+  };
+  applyTier(body, "opus", "claude-opus-5-5");
+  assert.equal(body.thinking, undefined);
+  assert.deepEqual(body.tool_choice, { type: "auto", disable_parallel_tool_use: true });
+});
+
+test("sonnet 5.5 gets the same treatment, provider prefix or not", () => {
+  const body = { model: "jev-router", thinking: { type: "disabled" }, tool_choice: { type: "any" } };
+  applyTier(body, "sonnet", "anthropic/claude-sonnet-5-5");
+  assert.equal(body.thinking, undefined);
+  assert.deepEqual(body.tool_choice, { type: "auto" });
+});
+
+test("older models keep disabled thinking and forced tool choice", () => {
+  const body = { model: "jev-router", thinking: { type: "disabled" }, tool_choice: { type: "any" } };
+  applyTier(body, "opus", "claude-opus-5");
+  assert.deepEqual(body.thinking, { type: "disabled" });
+  assert.deepEqual(body.tool_choice, { type: "any" });
+});
+
+test("a trailing system message does not hide the user's new turn", () => {
+  const body = withTools([
+    { role: "user", content: [{ type: "text", text: "<system-reminder>ctx</system-reminder>\nfix the bug" }] },
+    { role: "system", content: [{ type: "text", text: "# Environment" }] },
+  ]);
+  assert.equal(newTurnPrompt(body), "fix the bug");
+});
+
+test("routing to haiku folds mid-conversation system messages into the system prompt", () => {
+  const body = {
+    model: "jev-router",
+    system: [{ type: "text", text: "base" }],
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "system", content: [{ type: "text", text: "env", cache_control: { type: "ephemeral" } }] },
+    ],
+  };
+  applyTier(body, "haiku");
+  assert.deepEqual(body.messages, [{ role: "user", content: "hi" }]);
+  assert.deepEqual(body.system, [{ type: "text", text: "base" }, { type: "text", text: "env" }]);
+});
+
+test("models that accept system messages keep them in place", () => {
+  const messages = [{ role: "user", content: "hi" }, { role: "system", content: "env" }];
+  for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]) {
+    const body = { model: "jev-router", system: "base", messages: structuredClone(messages) };
+    applyTier(body, "opus", model);
+    assert.deepEqual(body.messages, messages, model);
+    assert.equal(body.system, "base", model);
+  }
+});
+
+test("a string system prompt survives folding", () => {
+  const body = { model: "jev-router", system: "base", messages: [{ role: "user", content: "hi" }, { role: "system", content: "env" }] };
+  applyTier(body, "sonnet", "claude-sonnet-5");
+  assert.deepEqual(body.system, [{ type: "text", text: "base" }, { type: "text", text: "env" }]);
 });
 
 test("an unknown tier leaves the request untouched", () => {

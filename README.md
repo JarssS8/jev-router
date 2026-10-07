@@ -205,6 +205,7 @@ sub-agents are pinned separately. Routing is fail-open: Jev failure never blocks
 | Variable | Interface | Effect |
 | --- | --- | --- |
 | `JEV_API_KEY` | Both | Enables routing. `TYPESAFE_API_KEY` also works. |
+| `AI_GATEWAY_API_KEY` | Both | Enables routing through Vercel AI Gateway instead of TypeSafe directly. Used only when no TypeSafe key is set; Claude Code and Codex keep their own login. |
 | `JEV_ALLOW_FABLE` | Both | Enables the opt-in long tier. |
 | `JEV_DEBUG` | Both | Logs decisions and rewrites to `~/.jev-claude.log` in interactive sessions. |
 | `JEV_DUMP` | Both | Dumps request bodies for debugging wire-format changes. |

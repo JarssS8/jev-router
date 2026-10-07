@@ -10,10 +10,41 @@ import { choice, score } from "@typesafe-ai/sdk";
  */
 export const TIERS = [
   { name: "haiku", id: "claude-haiku-4-5-20251001", family: "haiku", thinking: false, effort: false },
-  { name: "sonnet", id: "claude-sonnet-5", family: "sonnet", thinking: true, effort: true },
-  { name: "opus", id: "claude-opus-5", family: "opus", thinking: true, effort: true },
+  { name: "sonnet", id: "claude-sonnet-5-5", family: "sonnet", thinking: true, effort: true },
+  { name: "opus", id: "claude-opus-5-5", family: "opus", thinking: true, effort: true },
   { name: "fable", id: "claude-fable-5-1", family: "fable", thinking: true, effort: true },
 ];
+
+/**
+ * Models that reject `thinking: {type: "disabled"}` with a 400. Claude Code composes the body
+ * for "jev-router", not for the model it is routed to, so a disabled-thinking request has to
+ * drop the field and run with the model's default adaptive thinking instead.
+ */
+const NO_DISABLED_THINKING = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5"];
+
+/** Models that reject forced tool use (`tool_choice` of type `any` or `tool`) with a 400. */
+const NO_FORCED_TOOL_CHOICE = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1"];
+
+/**
+ * Models that accept `role: "system"` messages inside `messages`. Any other model gets them
+ * folded into the top-level system prompt. `claude-opus-5` also covers `claude-opus-5-5`.
+ */
+const MID_CONVERSATION_SYSTEM = [
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-sonnet-5-5",
+  "claude-fable-5",
+  "claude-mythos-5",
+];
+
+// Substring match so provider-prefixed ids such as `anthropic/claude-opus-5-5` are covered too.
+const matches = (model, list) => typeof model === "string" && list.some((id) => model.includes(id));
+
+export const rejectsDisabledThinking = (model) => matches(model, NO_DISABLED_THINKING);
+
+export const rejectsForcedToolChoice = (model) => matches(model, NO_FORCED_TOOL_CHOICE);
+
+export const supportsSystemMessages = (model) => matches(model, MID_CONVERSATION_SYSTEM);
 
 export const TIER_NAMES = TIERS.map((t) => t.name);
 

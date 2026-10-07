@@ -10,6 +10,9 @@ import {
   tierSpec,
   isAuto,
   shouldUseExactModel,
+  rejectsDisabledThinking,
+  rejectsForcedToolChoice,
+  supportsSystemMessages,
 } from "./config.mjs";
 import { askJev } from "./router.mjs";
 import { decide } from "./policy.mjs";
@@ -54,7 +57,10 @@ export function sanitizeSchema(node) {
  */
 export function newTurnPrompt(body) {
   if (!Array.isArray(body?.tools) || body.tools.length === 0) return null; // auxiliary call
-  const last = body?.messages?.[body.messages.length - 1];
+  // Claude Code appends mid-conversation `system` messages (environment details) after the
+  // user's prompt, so the turn is decided by the last message that is not one of those.
+  const turn = Array.isArray(body?.messages) ? body.messages.filter((m) => m?.role !== "system") : [];
+  const last = turn[turn.length - 1];
   if (!last || last.role !== "user") return null;
   let text;
   if (typeof last.content === "string") {
@@ -94,7 +100,41 @@ export function applyTier(body, tierName, model = idOf(tierName)) {
     delete body.output_config.effort;
     if (Object.keys(body.output_config).length === 0) delete body.output_config;
   }
+  if (body.thinking?.type === "disabled" && rejectsDisabledThinking(model)) {
+    delete body.thinking;
+  }
+  // Forcing a tool is a 400 on these models; `auto` keeps the tools and any
+  // `disable_parallel_tool_use` setting, and the prompt still steers the call.
+  if (["any", "tool"].includes(body.tool_choice?.type) && rejectsForcedToolChoice(model)) {
+    const { type, name, ...rest } = body.tool_choice;
+    body.tool_choice = { ...rest, type: "auto" };
+  }
+  if (!supportsSystemMessages(model)) foldSystemMessages(body);
   return body;
+}
+
+/**
+ * Moves mid-conversation `system` messages into the top-level system prompt, for models that
+ * reject `role: "system"` inside `messages` with a 400. The instructions still reach the
+ * model; only their position changes.
+ */
+export function foldSystemMessages(body) {
+  if (!Array.isArray(body.messages) || !body.messages.some((m) => m?.role === "system")) return;
+  const blocks = [];
+  body.messages = body.messages.filter((m) => {
+    if (m?.role !== "system") return true;
+    if (typeof m.content === "string") blocks.push({ type: "text", text: m.content });
+    else if (Array.isArray(m.content)) blocks.push(...m.content.filter((b) => b?.type === "text"));
+    return false;
+  });
+  if (blocks.length === 0) return;
+  const system =
+    typeof body.system === "string"
+      ? [{ type: "text", text: body.system }]
+      : Array.isArray(body.system)
+        ? body.system
+        : [];
+  body.system = [...system, ...blocks.map(({ type, text }) => ({ type, text }))];
 }
 
 /** Exact Claude models reported by the account, newest first; static ids are the cold-start fallback. */

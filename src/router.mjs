@@ -13,9 +13,28 @@ import { log } from "./log.mjs";
 // Built lazily because the constructor throws when no key is present, and a missing key
 // should degrade to "no routing", not stop the session from starting.
 let client;
+
+/**
+ * Where Jev is reached. A TypeSafe key calls TypeSafe directly; otherwise a Vercel AI Gateway
+ * key reaches the same Jev through the gateway's TypeSafe-compatible API, billed by Vercel.
+ * Only the routing decision goes this way: Claude Code and Codex keep their own login.
+ */
+export function jevConnection(env = process.env) {
+  const typesafeKey = env.JEV_API_KEY ?? env.TYPESAFE_API_KEY;
+  if (typesafeKey) return { apiKey: typesafeKey };
+  if (env.AI_GATEWAY_API_KEY) {
+    return {
+      apiKey: env.AI_GATEWAY_API_KEY,
+      baseURL: "https://ai-gateway.vercel.sh/typesafe",
+      defaultModel: "typesafe-ai/jev",
+    };
+  }
+  return null;
+}
+
 function getClient() {
   client ??= new TypeSafeClient({
-    apiKey: process.env.JEV_API_KEY ?? process.env.TYPESAFE_API_KEY,
+    ...jevConnection(),
     timeout: THRESHOLDS.jevTimeoutMs,
     retry: { maxRetries: THRESHOLDS.jevMaxRetries, backoffInitialMs: 150, backoffMaxMs: 400 },
     logLevel: "warn", // never "debug": request bodies contain the user's prompt
